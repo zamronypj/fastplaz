@@ -7,10 +7,11 @@ interface
 
 uses
   //SynExportHTML,
-  fpcgi, gettext, process, Math, fpjson, jsonparser, custweb, jsonConf,
+  fpcgi, gettext, process, Math, fpjson, jsonparser, jsonscanner, custweb, jsonConf,
   fphttpclient,
   //fphttpclient_with_ssl,
   RegExpr,
+  netdb, Sockets,
   Classes, SysUtils, fastplaz_handler, config_lib;
 
 const
@@ -29,11 +30,13 @@ const
   _SYSTEM_THEME_ENABLE = 'systems/theme_enable';
   _SYSTEM_THEME = 'systems/theme';
   _SYSTEM_DEBUG = 'systems/debug';
+  _SYSTEM_DEBUGLEVEL = 'systems/debug_level';
   _SYSTEM_CACHE_TYPE = 'systems/cache';
   _SYSTEM_CACHE_TIME = 'systems/cache_time';
   _SYSTEM_CACHE_WRITE = 'systems/write';
   _SYSTEM_TEMP_DIR = 'systems/temp';
   _SYSTEM_SESSION_DIR = 'systems/session_dir';
+  _SYSTEM_SESSION_STORAGE = 'systems/session_storage';
   _SYSTEM_SESSION_TIMEOUT = 'systems/session_timeout';
   _SYSTEM_HIT_STORAGE = 'systems/hit_storage';
 
@@ -67,53 +70,87 @@ const
 type
   TStringArray = array of string;
 
+  { TLocalJSONParser }
+
+  TLocalJSONParser = class(TJSONParser)
+  private
+    FScanner: TJSONScanner;
+  public
+    property Scanner: TJSONScanner read FScanner;
+  end;
+
 
 function i2s(pI: integer): string;
 function s2i(s: string): integer;
 function f2s(n: extended): string;
 function s2f(s: string): extended;
-function Implode(lst: TStringList; sep: string = ';'; prefix: string = ''; suffix: string = ''): string;
+function b2i(b: boolean): integer;
+function b2is(b: boolean): string;
+function b2s(b: boolean): string;
+function s2b(s: string): boolean;
+function Implode(lst: TStringList; sep: string = ';'; prefix: string = '';
+  suffix: string = ''): string;
 function Explode(Str, Delimiter: string): TStrings;
 function ExplodeTags(TagString: string): TStringList;
+function isRegex(s: string): boolean;
 function EchoError(const Fmt: string; const Args: array of const): string;
 function _GetTickCount: DWord;
 
 function SafeText(const SourceString: string): string;
-function ReplaceAll(const Subject: string; const OldPatterns, NewPatterns: array of string;
-  IgnoreCase: boolean = False): string;
-function ReplaceAll(const Subject: string; const OldPatterns: array of string; NewPatterns: string;
-  IgnoreCase: boolean = False): string;
+function ReplaceAll(const Subject: string;
+  const OldPatterns, NewPatterns: array of string; IgnoreCase: boolean = False): string;
+function ReplaceAll(const Subject: string; const OldPatterns: array of string;
+  NewPatterns: string; IgnoreCase: boolean = False): string;
 
 function AppendPathDelim(const Path: string): string;
 function DirectoryIsWritable(const DirectoryName: string): boolean;
 
 procedure DumpJSON(J: TJSonData; DOEOLN: boolean = False);
+function jsonGetString(J: TJsonData; index: string): string;
+function JsonFormatter(JsonString: string): string;
+function IsJsonValid(JsonString: string): boolean;
 function HexToInt(HexStr: string): int64;
 
+function WordNumber( s:string): integer;
+function isWord( s:string): boolean;
 function RandomString(PLen: integer; PrefixString: string = ''): string;
-function EncodeQueryString( Data: array of string): string;
+function RandomString(MinLength, MaxLength: integer; LeadingCapital: boolean = True;
+  UseUpper: boolean = True; UseLower: boolean = True; UseSpace: boolean = False;
+  UseNumber: boolean = False; UseSpecial: boolean = False;
+  UseSeed: boolean = False; DontUse: string = ''): string;
+function EncodeQueryString(Data: array of string): string;
+function StripSlash(Const DataString: UnicodeString): UnicodeString;
 
 // php like function
 procedure echo(const Message: string);
 procedure echo(const Number: integer);
 procedure echo(const Number: double);
 procedure pr(const Message: variant);
-procedure ta(const Message: variant; Width : integer = 800; Height : integer = 200);
+procedure ta(const Message: variant; Width: integer = 800; Height: integer = 200);
 procedure Die(const Message: string = ''); overload;
 procedure Die(const Number: integer); overload;
 procedure Die(const Message: TStringList); overload;
 
 function mysql_real_escape_string(const unescaped_string: string): string;
 function mysql_real_escape_string(const unescaped_strings: TStringList): string;
-function CleanUrl( URL:string):string;
+function CleanUrl(URL: string; Separator: string = '-'): string;
 function UrlEncode(const DecodedStr: string; Pluses: boolean = True): string;
 function UrlDecode(const EncodedStr: string): string;
 function ucwords(const str: string): string;
 
-function file_get_contents( TargetURL: string):string;
+function file_get_contents(TargetURL: string): string;
 
-function preg_replace( const RegexExpression, ReplaceString, SourceString : string; UseSubstitution : boolean = True) : string;
+function preg_match(const RegexExpression: string; SourceString: string): boolean;
+function preg_replace(const RegexExpression, ReplaceString, SourceString: string;
+  UseSubstitution: boolean = True): string;
 // php like function - end
+
+function isIPAddress(const IPAddress: string): boolean;
+function isEmail(const s: string): boolean;
+function isDomain(const s: string): boolean;
+function GetHostNameIP( HostName: string): string;
+
+function FastInfo(): string;
 
 implementation
 
@@ -130,8 +167,11 @@ end;
 
 function s2i(s: string): integer;
 begin
-  Result := 0;
-  TryStrToInt(s, Result);
+  try
+    TryStrToInt(s, Result);
+  except
+    Result := 0;
+  end;
 end;
 
 function f2s(n: extended): string;
@@ -140,15 +180,55 @@ begin
   try
     //Result := FloatToStr(n);
     //Result := FloatToStrF(n, ffCurrency, 8, 2);
-    Result := Format( '%.2f', [n]);
+    Result := Format('%.2f', [n]);
   except
   end;
 end;
 
 function s2f(s: string): extended;
 begin
-  Result := 0;
-  TryStrToFloat(s, Result);
+  try
+    Result := 0;
+    TryStrToFloat(s, Result);
+  except
+  end;
+end;
+
+function b2i(b: boolean): integer;
+begin
+  if b then
+    Result := 1
+  else
+    Result := 0;
+end;
+
+function b2is(b: boolean): string;
+begin
+  if b then
+    Result := '1'
+  else
+    Result := '0';
+end;
+
+function b2s(b: boolean): string;
+begin
+  if b then
+    Result := 'True'
+  else
+    Result := 'False';
+end;
+
+function s2b(s: string): boolean;
+begin
+  Result := False;
+  try
+    Result := StrToBool(s);
+  except
+  end;
+  if s = 'on' then
+    Result := True;
+  if s = 'required' then
+    Result := True;
 end;
 
 function Implode(lst: TStringList; sep: string; prefix: string; suffix: string): string;
@@ -228,10 +308,23 @@ begin
   if Pos('.', lst[0]) <> 0 then
   begin
     lst.Insert(0, Copy(lst[0], 1, Pos('.', lst[0]) - 1));
-    lst[1] := 'index=' + Copy(lst[1], Pos('.', lst[1]) + 1, Length(lst[1]) - Pos('.', lst[1]));
+    lst[1] := 'index=' + Copy(lst[1], Pos('.', lst[1]) + 1, Length(lst[1]) -
+      Pos('.', lst[1]));
   end;
 
   Result := lst;
+end;
+
+// maybe is regex ?
+function isRegex(s: string): boolean;
+begin
+  Result := False;
+  if Pos('?', s) <> 0 then
+    Result := True;
+  if Pos('^', s) <> 0 then
+    Result := True;
+  if Pos('$', s) <> 0 then
+    Result := True;
 end;
 
 function EchoError(const Fmt: string; const Args: array of const): string;
@@ -258,8 +351,8 @@ begin
   Result := s;
 end;
 
-function ReplaceAll(const Subject: string; const OldPatterns, NewPatterns: array of string;
-  IgnoreCase: boolean): string;
+function ReplaceAll(const Subject: string;
+  const OldPatterns, NewPatterns: array of string; IgnoreCase: boolean): string;
 var
   ReplaceFlags: TReplaceFlags;
   NewPattern: string;
@@ -279,8 +372,8 @@ begin
   end;
 end;
 
-function ReplaceAll(const Subject: string; const OldPatterns: array of string; NewPatterns: string;
-  IgnoreCase: boolean): string;
+function ReplaceAll(const Subject: string; const OldPatterns: array of string;
+  NewPatterns: string; IgnoreCase: boolean): string;
 var
   ReplaceFlags: TReplaceFlags;
   I: integer;
@@ -321,11 +414,13 @@ end;
 
 procedure ta(const Message: variant; Width: integer; Height: integer);
 begin
-  if Width = 0 then Width := 800;
-  echo( #13'<textarea style="width: '+i2s(Width)+'px !important; height: '+i2s(Height)+'px !important;">');
-  echo( #13'');
-  echo( string(Message));
-  echo( #13'</textarea>');
+  if Width = 0 then
+    Width := 800;
+  echo(#13'<textarea style="width: ' + i2s(Width) + 'px !important; height: ' +
+    i2s(Height) + 'px !important;">');
+  echo(#13'');
+  echo(string(Message));
+  echo(#13'</textarea>');
 end;
 
 procedure Die(const Number: integer);
@@ -336,6 +431,22 @@ end;
 procedure Die(const Message: TStringList);
 begin
   Die('<pre>' + Message.Text + '</pre>');
+end;
+
+function WordNumber(s: string): integer;
+var
+  lst : TStrings;
+begin
+  lst := Explode( s, ' ');
+  Result := lst.Count;
+  lst.Free;
+end;
+
+function isWord(s: string): boolean;
+begin
+  Result := False;
+  if WordNumber( s) = 1 then
+    Result := True;
 end;
 
 function RandomString(PLen: integer; PrefixString: string): string;
@@ -349,6 +460,54 @@ begin
   repeat
     Result := Result + str[Random(Length(str)) + 1];
   until (Length(Result) = PLen);
+end;
+
+function RandomString(MinLength, MaxLength: integer; LeadingCapital: boolean;
+  UseUpper: boolean; UseLower: boolean; UseSpace: boolean; UseNumber: boolean;
+  UseSpecial: boolean; UseSeed: boolean; DontUse: string): string;
+const
+  c_upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  c_lower = 'abcdefghijklmnopqrstuvwxyz';
+  c_number = '0123456789';
+  c_special = '~@#$%^*()_+-={}|][';
+var
+  rnd, chars: string;
+  i, len, clen: integer;
+begin
+  chars := '';
+  if UseLower then
+    chars := chars + c_lower;
+  if UseUpper then
+    chars := chars + c_upper;
+  if UseNumber then
+    chars := chars + c_number;
+  if UseSpecial then
+    chars := chars + c_special;
+  if UseSpace then
+  begin
+    for i := 0 to (Length(chars) mod 10) do
+      chars := chars + ' ';
+  end;
+  if DontUse <> '' then
+  begin
+    // .. next ...
+  end;
+
+  Randomize;
+  len := RandomRange(MinLength, MaxLength);
+  clen := length(chars);
+  rnd := '';
+  try
+    for i := 1 to len do
+    begin
+      rnd := rnd + chars[RandomRange(1, clen)];
+    end;
+  except
+  end;
+
+  if LeadingCapital then
+    rnd[1] := upCase(rnd[1]);
+  Result := rnd;
 end;
 
 function EncodeQueryString(Data: array of string): string;
@@ -372,10 +531,25 @@ begin
   Result := s;
 end;
 
+function StripSlash(const DataString: UnicodeString): UnicodeString;
+var
+  L : Integer;
+begin
+  L:=Length(DataString);
+  If (L>0) and (DataString[l]='/') then
+    Result:=Copy(DataString,1,L-1)
+  else
+    Result:=DataString;
+end;
+
 procedure Die(const Message: string);
 begin
   //raise EFPWebError.CreateFmt( '%s %s', [Application.Response.Contents.Text, Message]);
   //raise EFPWebError.Create(Message);
+  StopTime:= _GetTickCount;
+  ElapsedTime:= StopTime - StartTime;
+
+  Application.Response.SetCustomHeader( 'TimeUsage', i2s( ElapsedTime));;
   Application.Response.Contents.Add(Message);
   Application.Response.SendContent;
   Application.Terminate;
@@ -454,6 +628,57 @@ begin
     echo(#13#10);
 end;
 
+function jsonGetString(J: TJsonData; index: string): string;
+var
+  i: integer;
+begin
+  Result := '';
+  try
+    i := TJSONObject(J).IndexOfName(index);
+    if i <> -1 then
+      Result := J.Items[i].AsString;
+  except
+  end;
+end;
+
+function JsonFormatter(JsonString: string): string;
+  // error line : VJSONParser.Scanner.CurRow;
+var
+  VJSONData: TJSONData = nil;
+  VJSONParser: TLocalJSONParser;
+begin
+  Result := '';
+  JsonString := trim(JsonString);
+  if JsonString = '' then
+    Exit;
+
+  VJSONParser := TLocalJSONParser.Create(JsonString);
+  try
+    try
+      VJSONParser.Strict := True;
+      VJSONData := VJSONParser.Parse;
+      Result := VJSONData.FormatJSON([], 2);
+      ;
+      VJSONData.Free;
+    except
+      on E: Exception do
+      begin
+      end;
+    end;
+  finally
+    VJSONParser.Free;
+  end;
+
+end;
+
+function IsJsonValid(JsonString: string): boolean;
+begin
+  if JsonFormatter(JsonString) = '' then
+    Result := False
+  else
+    Result := True;
+end;
+
 function HexToInt(HexStr: string): int64;
 var
   RetVar: int64;
@@ -482,7 +707,8 @@ begin
   Result := RetVar;
 end;
 
-function StringReplaceExt(const S: string; OldPattern, NewPattern: array of string; Flags: TReplaceFlags): string;
+function StringReplaceExt(const S: string; OldPattern, NewPattern: array of string;
+  Flags: TReplaceFlags): string;
 var
   i: integer;
 begin
@@ -512,13 +738,12 @@ begin
   FreeAndNil(lst);
 end;
 
-function CleanUrl(URL: string): string;
+function CleanUrl(URL: string; Separator: string): string;
 begin
-  Result := LowerCase( Trim( URL));
-  Result := ReplaceAll( Result,
-    [' ', ',', '?', '!', '.', '''', '"', #13, #10, '/', '\'],
-    '-');
-  Result := ReplaceAll( Result, ['---', '--'], '-');
+  Result := LowerCase(Trim(URL));
+  Result := ReplaceAll(Result, [' ', ',', '?', '!', '.', '''', '+',
+    '^', '"', #13, #10, '/', '\', '(', ')', '[', ']', '*', '$', '!'], Separator);
+  Result := ReplaceAll(Result, ['---', '--'], '-');
 end;
 
 function UrlEncode(const DecodedStr: string; Pluses: boolean): string;
@@ -584,16 +809,16 @@ end;
 
 function file_get_contents(TargetURL: string): string;
 var
-  s : string;
+  s: string;
 begin
   Result := '';
-  With TFPHTTPClient.Create(Nil) do
+  with TFPHTTPClient.Create(nil) do
   begin
     try
-      s := Get( TargetURL);
+      s := Get(TargetURL);
       Result := s;
     except
-      on e : Exception do
+      on e: Exception do
       begin
         Result := e.Message;
       end;
@@ -603,13 +828,28 @@ begin
   end;
 end;
 
-function preg_replace(const RegexExpression, ReplaceString, SourceString: string; UseSubstitution: boolean): string;
+function preg_match(const RegexExpression: string; SourceString: string): boolean;
+begin
+  Result := False;
+  try
+    with TRegExpr.Create do
+    begin
+      Expression := RegexExpression;
+      Result := Exec(SourceString);
+      Free;
+    end;
+  except
+  end;
+end;
+
+function preg_replace(const RegexExpression, ReplaceString, SourceString: string;
+  UseSubstitution: boolean): string;
 begin
   try
     with TRegExpr.Create do
     begin
       Expression := RegexExpression;
-      Result := Replace( SourceString, ReplaceString, UseSubstitution);
+      Result := Replace(SourceString, ReplaceString, UseSubstitution);
       Free;
     end;
   except
@@ -617,11 +857,69 @@ begin
   end;
 end;
 
+function isIPAddress(const IPAddress: string): boolean;
+begin
+  Result := execregexpr('[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}', IPAddress);
+end;
+
+function isEmail(const s: string): boolean;
+begin
+  Result := execregexpr('(^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$)', s);
+end;
+
+function isDomain(const s: string): boolean;
+begin
+  //Result := execregexpr('(^(?!\-)(?:[a-zA-Z\d\-]{0,62}[a-zA-Z\d]\.){1,126}(?!\d+)[a-zA-Z\d]{1,63}$)', s);
+  Result := execregexpr('^((\w+)\.)?(([\w-]+)?)(\.[\w-]+){1,2}$', s);
+end;
+
+function GetHostNameIP(HostName: string): string;
+var
+  i: integer;
+  ans: array [1..10] of THostAddr;
+  lst: TStrings;
+begin
+  Result := '';
+  i := ResolveName(HostName, ans);
+  if i = 0 then
+    Exit;
+  Result := HostAddrToStr(Ans[1]);
+
+  lst := Explode( Result, '.');
+  Result := '';
+  for i := 3 downto 1 do
+  begin
+    Result := Result + lst[i] + '.';
+  end;
+  Result := Result + lst[0];
+  lst.Free;
+end;
+
+function FastInfo: string;
+var
+  lst: TStringList;
+  s: string;
+begin
+  lst := TStringList.Create;
+  Application.GetEnvironmentList(lst);
+
+  s := '<pre><b>Your Server Info:</b><br>';
+  s := s + #13#10'TargetCPU ' + {$i %FPCTARGETCPU%};
+  s := s + #13#10'Target OS ' + {$i %FPCTARGETOS%};
+  s := s + #13#10'FPC Version ' + {$i %FPCVERSION%};
+  s := s + #13#10'Build Date ' + {$i %DATE%};
+  s := s + #13#10#13;
+
+  lst.Text := s + lst.Text;
+  Result := lst.Text;
+  lst.Free;
+end;
+
 initialization
   LANG := 'en'; //GetLanguageIDs( LANG, FallbackLANG);
   AppData.debug := True;
   Config := TMyConfig.Create(nil);
-  Config.ValidateFile( 'config/config.json');
+  Config.ValidateFile('config/config.json');
 
 
 finalization

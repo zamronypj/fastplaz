@@ -1,7 +1,7 @@
 unit fastplaz_handler;
 
 {$mode objfpc}{$H+}
-{$include ../../define.inc}
+{$include ../../define_fastplaz.inc}
 
 interface
 
@@ -9,9 +9,12 @@ uses
   {$IFDEF HEAPTRACE}
   heaptrc,
   {$ENDIF}
+  RegExpr,
   sqldb, gettext, session_controller, module_controller,
   config_lib,
-  fpcgi, httpdefs, fpHTTP, fpWeb, webutil, custweb, dateutils,
+  fpcgi, httpdefs, fpHTTP, fpWeb,
+  //webutil,
+  custweb, dateutils, variants,
   SysUtils, Classes;
 
 const
@@ -30,14 +33,21 @@ resourcestring
   __Err_Theme_Modul_NotFond = 'Modul "%s" not found';
   __Err_Theme_ForeachNotImplemented = 'foreach array still not implemented';
 
+  __Result_Default_Get = 'Default GET Result';
+  __Result_Default_Post = 'Default POST Result';
+  __Result_Default_Put = 'Default PUT Result';
+  __Result_Default_Delete = 'Default DELETE Result';
+  __Result_Default_Option = 'Default OPTION Result';
+  __Result_Default_Handler = 'Request Handler Default';
+
   __Content_Not_Found = 'Nothing Found';
   __Tag_Content_Not_Found = 'Tags Content "%s" Not Found';
 
   // methode
   ALL = '';
-  GET = 'GET';
-  POST = 'POST';
-  PUT = 'PUT';
+  METHOD_GET = 'GET';
+  METHOD_POST = 'POST';
+  METHOD_PUT = 'PUT';
   HEAD = 'HEAD';
   OPTIONS = 'OPTIONS';
 
@@ -62,6 +72,7 @@ type
     tablePrefix: string;
     SessionID: string;
     SessionDir: string;
+    SessionStorage: integer; // 1: file; 2 database
     hitStorage: string;
     databaseRead,
     databaseWrite: string;
@@ -69,12 +80,19 @@ type
     useDatabase,
     initialized,
     debug: boolean;
+    debugLevel: integer;
     isReady: boolean;
   end;
 
-  TOnBlockController = procedure(Sender: TObject; FunctionName: string; Parameter: TStrings;
-    var ResponseString: string) of object;
-  TTagCallback = function(const ATagName: string; AParams: TStringList): string of object;
+  TOnBlockController = procedure(Sender: TObject; FunctionName: string;
+    Parameter: TStrings; var ResponseString: string) of object;
+  TTagCallback = function(const ATagName: string;
+    AParams: TStringList): string of object;
+
+  TOnMenu = function(RequestHeader: TRequest): string of object;
+  TOnSearch = function(Keyword: string; RequestHeader: TRequest): string of object;
+  TOnNotification = function(NotifType: string;
+    RequestHeader: TRequest): string of object;
 
   { TMyCustomWebModule }
 
@@ -83,46 +101,113 @@ type
   private
     FisJSON, FCreateSession: boolean;
     FOnBlockController: TOnBlockController;
+    FOnMenu: TOnMenu;
+    FOnNotification: TOnNotification;
+    FOnSearch: TOnSearch;
 
     function GetBaseURL: string;
+    function GetCSRFFailedCount: integer;
+    function GetCustomHeader(const KeyName: string): string;
     function GetEnvirontment(const KeyName: string): string;
+    function GetHeader(const KeyName: string): string;
+    function GetIsActive: boolean;
+    function GetIsAjax: boolean;
     function GetIsDelete: boolean;
     function GetIsGet: boolean;
     function GetIsPost: boolean;
     function GetIsPut: boolean;
+    function GetIsValidCSRF: boolean;
+    function getModuleActive: string;
     function GetSession: TSessionController;
     function GetSessionID: string;
     function GetTablePrefix: string;
     function GetTag(const TagName: string): TTagCallback;
+    function GetTimeUsage: integer;
     function GetURI: string;
+    procedure SetCustomHeader(const KeyName: string; AValue: string);
+    procedure SetFlashMessage(AValue: string);
     procedure SetTag(const TagName: string; AValue: TTagCallback);
 
+    procedure RequestHandlerDefault(Sender: TObject; ARequest: TRequest;
+      AResponse: TResponse; var Handled: boolean);
   public
+    RouteRegex: string;
+    VisibleModuleName: string;
     constructor CreateNew(AOwner: TComponent; CreateMode: integer); override;
     destructor Destroy; override;
     procedure HandleRequest(ARequest: TRequest; AResponse: TResponse); override;
+
+    procedure Get; virtual;
+    procedure Post; virtual;
+    procedure Put; virtual;
+    procedure Delete; virtual;
+    procedure Option; virtual;
 
     procedure LanguageInit;
 
     property URI: string read GetURI;
     property Environtment[const KeyName: string]: string read GetEnvirontment;
+    property Header[const KeyName: string]: string read GetHeader;
+    property CustomHeader[const KeyName: string]: string read GetCustomHeader write SetCustomHeader;
 
     property Tags[const TagName: string]: TTagCallback read GetTag write SetTag; default;
-    procedure TagController(Sender: TObject; const TagString: string; TagParams: TStringList;
-      Out ReplaceText: string);
+    procedure TagController(Sender: TObject; const TagString: string;
+      TagParams: TStringList; Out ReplaceText: string);
     property BaseURL: string read GetBaseURL;
-    property OnBlockController: TOnBlockController read FOnBlockController write FOnBlockController;
+    property OnBlockController: TOnBlockController
+      read FOnBlockController write FOnBlockController;
 
+    property OnMenu: TOnMenu read FOnMenu write FOnMenu;
+    property OnSearch: TOnSearch read FOnSearch write FOnSearch;
+    property OnNotification: TOnNotification read FOnNotification write FOnNotification;
+
+    property ModuleActive: string read getModuleActive;
+    property isActive: boolean read GetIsActive;
     property isPost: boolean read GetIsPost;
     property isGet: boolean read GetIsGet;
     property isPut: boolean read GetIsPut;
     property isDelete: boolean read GetIsDelete;
+    property isValidCSRF: boolean read GetIsValidCSRF;
+    property isAjax: boolean read GetIsAjax;
+
+    property FlashMessages: string write SetFlashMessage;
+    property CSRFFailedCount: integer read GetCSRFFailedCount;
 
     property CreateSession: boolean read FCreateSession write FCreateSession;
     property Session: TSessionController read GetSession;
     property SessionID: string read GetSessionID;
 
     property TablePrefix: string read GetTablePrefix;
+    property TimeUsage: integer read GetTimeUsage;
+  end;
+
+  TMyCustomWebModuleClass = class of TMyCustomWebModule;
+
+  { TModuleLoadedItem }
+
+  TModuleLoadedItem = class(TCollectionItem)
+  private
+    FModuleClass: TMyCustomWebModuleClass;
+    FModuleName: string;
+    FModuleStore: TMyCustomWebModule;
+    FSkipStreaming: boolean;
+  public
+    property ModuleClass: TMyCustomWebModuleClass read FModuleClass write FModuleClass;
+    property ModuleStore: TMyCustomWebModule read FModuleStore write FModuleStore;
+    property ModuleName: string read FModuleName write FModuleName;
+    property SkipStreaming: boolean read FSkipStreaming write FSkipStreaming;
+  end;
+
+  { TModuleLoaded }
+
+  TModuleLoaded = class(TCollection)
+  private
+    function GetModule(Index: integer): TModuleLoadedItem;
+    procedure SetModule(Index: integer; AValue: TModuleLoadedItem);
+  public
+    property Modules[Index: integer]: TModuleLoadedItem read GetModule write SetModule;
+      default;
+    function IndexOfModule(const AModuleName: string): integer;
   end;
 
   { TFastPlasAppandler }
@@ -139,31 +224,45 @@ type
     property isDisplayError: boolean read FIsDisplayError write FIsDisplayError;
 
     function GetActiveModuleName(Arequest: TRequest): string;
-    procedure OnGetModule(Sender: TObject; ARequest: TRequest; var ModuleClass: TCustomHTTPModuleClass);
+    procedure OnGetModule(Sender: TObject; ARequest: TRequest;
+      var ModuleClass: TCustomHTTPModuleClass);
     procedure ExceptionHandler(Sender: TObject; E: Exception);
-    function Tag_InternalContent_Handler(const TagName: string; Params: TStringList): string;
+    function Tag_InternalContent_Handler(const TagName: string;
+      Params: TStringList): string;
 
+    procedure AddLoadModule(const ModuleName: string;
+      ModuleClass: TMyCustomWebModuleClass; SkipStreaming: boolean = True);
+    function LoadModule(const ModuleName: string): TMyCustomWebModule;
+    procedure RegisterModule(const ModuleName: string;
+      ModuleClass: TMyCustomWebModuleClass; LoadOnStart: boolean = True;
+      SkipStreaming: boolean = False);
     function FindModule(ModuleClass: TCustomHTTPModuleClass): TCustomHTTPModule;
     procedure AddLog(Message: string);
     procedure DieRaise(const Fmt: string; const Args: array of const);
   end;
 
+  { TGET }
+
   TGET = class
   private
+    function GetCount: integer;
     function GetValue(const Name: string): string;
     procedure SetValue(const Name: string; AValue: string);
   public
     property Values[Name: string]: string read GetValue write SetValue; default;
+    property Count: integer read GetCount;
   end;
 
   { TPOST }
 
   TPOST = class
   private
+    function GetCount: integer;
     function GetValue(const Variable: string): string;
     procedure SetValue(const Variable: string; AValue: string);
   public
     property Values[variable: string]: string read GetValue write SetValue; default;
+    property Count: integer read GetCount;
   end;
 
   { TREQUESTVAR }
@@ -186,19 +285,33 @@ type
     function ReadDateTime(const variable: string): TDateTime;
   end;
 
+  { TSESSION }
+
+  { TSERVER }
+
+  TSERVER = class
+  private
+    function GetValue(const variable: string): string;
+  public
+    property Values[variable: string]: string read GetValue; default;
+  end;
+
   { TRoute }
 
   TRoute = class
   private
+    procedure Add(const ModuleName: string; const PatternURL: string;
+      ModuleClass: TMyCustomWebModuleClass; Method: string = '';
+      LoadOnStart: boolean = False; SkipStreaming: boolean = True);
   public
-    procedure Add(const PatternURL: string; ModuleClass: TCustomHTTPModuleClass; Method: string = '';
-      SkipStreaming: boolean = True);
+    procedure Add(const ModuleName: string; ModuleClass: TMyCustomWebModuleClass;
+      Method: string = ''; LoadOnStart: boolean = False; SkipStreaming: boolean = True);
   end;
 
 procedure InitializeFastPlaz(Sender: TObject = nil);
-procedure Redirect(const URL: string);
+procedure Redirect(const URL: string; const FlashMessage: string = '');
 
-procedure DisplayError(const Message: string);
+procedure DisplayError(const Message: string; const Layout: string = 'error');
 procedure Debug(const Message: integer; const Key: string = '');
 procedure Debug(const Message: string; const Key: string = '');
 procedure Debug(const Sender: TObject; const Key: string = '');
@@ -208,22 +321,25 @@ var
   Config: TMyConfig;
   SessionController: TSessionController;
   FastPlasAppandler: TFastPlasAppandler;
+  ModuleLoaded: TModuleLoaded;
   ModUtil: TModUtil;
   Route: TRoute;
   _GET: TGET;
   _POST: TPOST;
   _SESSION: TSESSION;
   _REQUEST: TREQUESTVAR;
+  _SERVER: TSERVER;
   _DebugInfo: TStringList;
   StartTime, StopTime, ElapsedTime: cardinal;
+  MemoryAllocated: integer;
 
 implementation
 
-uses common, language_lib, database_lib, logutil_lib, theme_controller,
-  about_controller;
+uses common, language_lib, database_lib, logutil_lib, theme_controller, html_lib;
 
 var
   MethodMap: TStringList;
+  RouteRegexMap: TStringList;
 
 function _CleanVar(const Value: string): string;
 begin
@@ -236,6 +352,8 @@ begin
   if AppData.initialized then
     Exit;
   AppData.initialized := True;
+
+  //-- compatibility with old-style
   AppData.module := _GET['mod'];
   AppData.modtype := _GET['type'];
   AppData.func := _GET['func'];
@@ -252,21 +370,21 @@ begin
 
   if Config.Status = 2 then
     die(Config.Message);
-  AppData.sitename := Config.GetValue(_SYSTEM_SITENAME, _APP);
-  AppData.slogan := Config.GetValue(_SYSTEM_SLOGAN, _APP);
-  AppData.baseUrl := Config.GetValue(_SYSTEM_BASEURL, '');
-  AppData.admin_email := Config.GetValue(_SYSTEM_WEBMASTER_EMAIL, Application.Email);
-  AppData.language := Config.GetValue(_SYSTEM_LANGUAGE_DEFAULT, 'en');
+  AppData.sitename := string(Config.GetValue(_SYSTEM_SITENAME, _APP));
+  AppData.slogan := string(Config.GetValue(_SYSTEM_SLOGAN, _APP));
+  AppData.baseUrl := string(Config.GetValue(_SYSTEM_BASEURL, ''));
+  AppData.admin_email := string(
+    Config.GetValue(_SYSTEM_WEBMASTER_EMAIL, Application.Email));
+  AppData.language := string(Config.GetValue(_SYSTEM_LANGUAGE_DEFAULT, 'en'));
   AppData.themeEnable := Config.GetValue(_SYSTEM_THEME_ENABLE, True);
-  AppData.theme := Config.GetValue(_SYSTEM_THEME, 'default');
+  AppData.theme := string(Config.GetValue(_SYSTEM_THEME, 'default'));
   AppData.debug := Config.GetValue(_SYSTEM_DEBUG, False);
-  AppData.cacheType := Config.GetValue(_SYSTEM_CACHE_TYPE, 'file');
+  AppData.debugLevel := Config.GetValue(_SYSTEM_DEBUGLEVEL, 0);
+  AppData.cacheType := string(Config.GetValue(_SYSTEM_CACHE_TYPE, 'file'));
   AppData.cacheWrite := Config.GetValue(_SYSTEM_CACHE_WRITE, True);
 
   AppData.cacheTime := Config.GetValue(_SYSTEM_CACHE_TIME, 3);
-  AppData.tempDir := Config.GetValue(_SYSTEM_TEMP_DIR, 'ztemp');
-  AppData.SessionDir := Config.GetValue(_SYSTEM_SESSION_DIR, '');
-  AppData.hitStorage := Config.GetValue(_SYSTEM_HIT_STORAGE, '');
+  AppData.tempDir := string(Config.GetValue(_SYSTEM_TEMP_DIR, 'ztemp'));
 
   if AppData.baseUrl = '' then
   begin
@@ -274,54 +392,76 @@ begin
       ExtractFilePath(GetEnvironmentVariable('SCRIPT_NAME'));
   end;
 
-  if AppData.hitStorage = 'file' then
-    ThemeUtil.HitType := htFile;
-  if AppData.hitStorage = 'database' then
-    ThemeUtil.HitType := htDatabase;
-  if AppData.hitStorage = 'sqlite' then
-    ThemeUtil.HitType := htSQLite;
+  AppData.hitStorage := string(Config.GetValue(_SYSTEM_HIT_STORAGE, ''));
+  try
+    if AppData.hitStorage <> '' then
+    begin
+      if AppData.hitStorage = 'file' then
+        ThemeUtil.HitType := htFile;
+      if AppData.hitStorage = 'database' then
+        ThemeUtil.HitType := htDatabase;
+      if AppData.hitStorage = 'sqlite' then
+        ThemeUtil.HitType := htSQLite;
+    end;
+  except
+    on e: Exception do
+    begin
+      LogUtil.add(E.Message, 'hitstorage-init');
+    end;
+  end;
 
   if AppData.themeEnable then
   begin
     ThemeUtil := TThemeUtil.Create;
   end;
 
-  //LogUtil.registerError('auw');
-  //-- process the homepage
-  if AppData.module = '' then
-  begin
-
-  end;
-
   //-- session
+  AppData.SessionDir := string(Config.GetValue(_SYSTEM_SESSION_DIR, ''));
   if AppData.SessionDir <> '' then
     SessionController.SessionDir := AppData.SessionDir;
+  AppData.SessionStorage := _SESSION_STORAGE_FILE;
+  if string(Config.GetValue(_SYSTEM_SESSION_STORAGE, 'file')) = 'database' then
+    AppData.SessionStorage := _SESSION_STORAGE_DATABASE;
+  SessionController.Storage := AppData.SessionStorage;
+  if AppData.SessionStorage = _SESSION_STORAGE_DATABASE then
+  begin
+    DataBaseInit;
+  end;
+  SessionController.TimeOut :=
+    Config.GetValue(_SYSTEM_SESSION_TIMEOUT, _SESSION_TIMEOUT_DEFAULT);
   if not SessionController.StartSession then
   begin
     //SessionController.EndSession;
     //SessionController.StartSession;
   end;
-  SessionController.TimeOut := Config.GetValue(_SYSTEM_SESSION_TIMEOUT, 0);
-  ;
-  //todo: auto clean-up session
   //-- session - end
+
+  //todo: auto clean-up session
+
 
   //-- language
 
   AppData.isReady := True;
+  {$ifdef DEBUG}
+  if AppData.debug and (AppData.debugLevel = 1) then
+    LogUtil.Add('--== initialize: ' + Application.Request.PathInfo, 'init');
+  {$endif}
 end;
 
-procedure Redirect(const URL: string);
+procedure Redirect(const URL: string; const FlashMessage: string);
 begin
+  if FlashMessage <> '' then
+    ThemeUtil.FlashMessages := FlashMessage;
   Application.Response.Content := '';
   //Application.Response.SendRedirect(URL);
   //Application.Response.SendResponse;
   Application.Response.Location := URL;
   Application.Response.SendHeaders;
+  Application.Destroy;
 end;
 
 
-procedure DisplayError(const Message: string);
+procedure DisplayError(const Message: string; const Layout: string);
 begin
   FastPlasAppandler.isDisplayError := True;
   if not AppData.themeEnable then
@@ -331,10 +471,12 @@ begin
 
   if (not AppData.useDatabase) or (AppData.useDatabase and AppData.databaseActive) then
   begin
-    Application.Response.Contents.Text := ThemeUtil.Render( @ThemeUtil.TagDefault, 'error');
     Application.Response.Contents.Text :=
-      ReplaceAll(Application.Response.Contents.Text, [ThemeUtil.StartDelimiter + '$maincontent' +
-      ThemeUtil.EndDelimiter], '<div class="box error">' + Message + '</div>');
+      ThemeUtil.Render(@ThemeUtil.TagDefault, Layout);
+    Application.Response.Contents.Text :=
+      ReplaceAll(Application.Response.Contents.Text,
+      [ThemeUtil.StartDelimiter + 'maincontent' + ThemeUtil.EndDelimiter],
+      '<div class="box error">' + Message + '</div>');
   end
   else
   begin
@@ -393,32 +535,66 @@ begin
   echo(prefix + html + suffic);
 end;
 
+{ TModuleLoaded }
+
+function TModuleLoaded.GetModule(Index: integer): TModuleLoadedItem;
+begin
+  Result := TModuleLoadedItem(Items[Index]);
+end;
+
+procedure TModuleLoaded.SetModule(Index: integer; AValue: TModuleLoadedItem);
+begin
+  Items[Index] := AValue;
+end;
+
+function TModuleLoaded.IndexOfModule(const AModuleName: string): integer;
+begin
+  Result := Count - 1;
+  while (Result >= 0) and (CompareText(Modules[Result].ModuleName, AModuleName) <> 0) do
+    Dec(Result);
+end;
+
 { TRoute }
 
 // SkipStreaming: True -> skip the streaming support - which means you don't require Lazarus!!!
-procedure TRoute.Add(const PatternURL: string; ModuleClass: TCustomHTTPModuleClass; Method: string;
+procedure TRoute.Add(const ModuleName: string; ModuleClass: TMyCustomWebModuleClass;
+  Method: string; LoadOnStart: boolean; SkipStreaming: boolean);
+var
+  moduleNameReal: string;
+begin
+  if isRegex(ModuleName) then
+  begin
+    // next;
+  end;
+  moduleNameReal := CleanUrl(ModuleName);
+  moduleNameReal := ReplaceAll(moduleNameReal, ['_'], '');
+  moduleNameReal := ReplaceAll(moduleNameReal, ['-', '|'], '_');
+  Add(moduleNameReal, ModuleName, ModuleClass, Method, LoadOnStart, SkipStreaming);
+end;
+
+procedure TRoute.Add(const ModuleName: string; const PatternURL: string;
+  ModuleClass: TMyCustomWebModuleClass; Method: string; LoadOnStart: boolean;
   SkipStreaming: boolean);
 var
-  moduleName: string;
-  pattern_url: TStrings;
   i: integer;
   mi: TModuleItem;
   mc: TCustomHTTPModuleClass;
   m: TCustomHTTPModule;
 begin
-
-  // prepare pattern-url for next version
-  pattern_url := Explode(PatternURL, '/');
-  moduleName := pattern_url[0];
-
   if not Assigned(MethodMap) then
     MethodMap := TStringList.Create;
-  MethodMap.Values[moduleName] := Method;
+  if not Assigned(RouteRegexMap) then
+    RouteRegexMap := TStringList.Create;
 
-  RegisterHTTPModule(moduleName, ModuleClass, SkipStreaming);
+  MethodMap.Values[ModuleName] := Method;
+  RouteRegexMap.Values[ModuleName] := PatternURL;
+
+  //RegisterHTTPModule( ModuleName, ModuleClass, SkipStreaming);
+  FastPlasAppandler.RegisterModule(ModuleName, ModuleClass, LoadOnStart, SkipStreaming);
 
   //mi := ModuleFactory.FindModule( moduleName);
-  i := ModuleFactory.IndexOfModule(moduleName);
+  {
+  i := ModuleFactory.IndexOfModule( ModuleName);
   if i <> -1 then
   begin
     mi := ModuleFactory[I];
@@ -429,6 +605,10 @@ begin
       //--
     end;
   end;
+  }
+
+  //  if LoadOnStart then
+  //    FastPlasAppandler.AddLoadModule( ModuleName, TMyCustomWebModuleClass(ModuleClass), SkipStreaming);
 
 end;
 
@@ -436,12 +616,19 @@ end;
 
 function TSESSION.GetValue(variable: string): variant;
 begin
-  Result := SessionController[variable];
+  Result := '';
+  try
+    Result := SessionController[variable];
+  except
+  end;
 end;
 
 procedure TSESSION.SetValue(variable: string; AValue: variant);
 begin
   SessionController[variable] := AValue;
+  if ((VarType(AValue) = varSmallInt) or (VarType(AValue) = varinteger) or
+    (VarType(AValue) = varint64)) then
+    SessionController[variable] := i2s(AValue);
 end;
 
 function TSESSION.ReadDateTime(const variable: string): TDateTime;
@@ -470,9 +657,45 @@ begin
   Result := ThemeUtil.BaseURL;
 end;
 
+function TMyCustomWebModule.GetCSRFFailedCount: integer;
+begin
+  Result := s2i(_SESSION[__HTML_CSRF_TOKEN_KEY_FAILEDCOUNT]);
+end;
+
+function TMyCustomWebModule.GetCustomHeader(const KeyName: string): string;
+begin
+  Response.GetCustomHeader( KeyName);
+end;
+
 function TMyCustomWebModule.GetEnvirontment(const KeyName: string): string;
 begin
   Result := Application.EnvironmentVariable[KeyName];
+end;
+
+function TMyCustomWebModule.GetHeader(const KeyName: string): string;
+begin
+  Result := GetEnvironmentVariable( KeyName);
+end;
+
+function TMyCustomWebModule.GetIsActive: boolean;
+var
+  i: integer;
+begin
+  Result := False;
+  i := ModuleFactory.IndexOfModule(FastPlasAppandler.GetActiveModuleName(
+    Application.Request));
+  if i = -1 then
+    Exit;
+  if ClassName = ModuleFactory[i].ModuleClass.ClassName then
+    Result := True;
+end;
+
+function TMyCustomWebModule.GetIsAjax: boolean;
+begin
+  Result := False;
+  if (LowerCase(Application.EnvironmentVariable['HTTP_X_REQUESTED_WITH']) =
+    'xmlhttprequest') then
+    Result := True;
 end;
 
 function TMyCustomWebModule.GetIsDelete: boolean;
@@ -485,22 +708,61 @@ end;
 function TMyCustomWebModule.GetIsGet: boolean;
 begin
   Result := False;
-  if Application.Request.Method = GET then
+  if Application.Request.Method = METHOD_GET then
     Result := True;
 end;
 
 function TMyCustomWebModule.GetIsPost: boolean;
 begin
   Result := False;
-  if Application.Request.Method = POST then
+  if Application.Request.Method = METHOD_POST then
     Result := True;
 end;
 
 function TMyCustomWebModule.GetIsPut: boolean;
 begin
   Result := False;
-  if Application.Request.Method = PUT then
+  if Application.Request.Method = METHOD_PUT then
     Result := True;
+end;
+
+function TMyCustomWebModule.GetIsValidCSRF: boolean;
+var
+  i: integer;
+begin
+  Result := False;
+  if not isPost then
+    Exit;
+
+  if _POST['csrftoken'] = '' then
+    Exit;
+
+  if _POST['csrftoken'] = _SESSION[__HTML_CSRF_TOKEN_KEY] then
+    Result := True;
+
+  if Result then
+  begin
+    HTMLUtil.ResetCSRF;
+  end
+  else
+  begin
+    i := s2i(_SESSION[__HTML_CSRF_TOKEN_KEY_FAILEDCOUNT]) + 1;
+    _SESSION[__HTML_CSRF_TOKEN_KEY_FAILEDCOUNT] := i;
+  end;
+
+  SessionController.ForceUpdate;
+end;
+
+function TMyCustomWebModule.getModuleActive: string;
+var
+  i: integer;
+begin
+  Result := '';
+  i := ModuleFactory.IndexOfModule(FastPlasAppandler.GetActiveModuleName(
+    Application.Request));
+  if i = -1 then
+    Exit;
+  Result := ModuleFactory[i].ModuleClass.ClassName;
 end;
 
 function TMyCustomWebModule.GetSession: TSessionController;
@@ -524,9 +786,27 @@ begin
     Result := ___TagCallbackMap[TagName];
 end;
 
+function TMyCustomWebModule.GetTimeUsage: integer;
+begin
+  StopTime:= _GetTickCount;
+  ElapsedTime:= StopTime - StartTime;
+  Result := ElapsedTime;
+end;
+
 function TMyCustomWebModule.GetURI: string;
 begin
   Result := FastPlasAppandler.URI;
+end;
+
+procedure TMyCustomWebModule.SetCustomHeader(const KeyName: string;
+  AValue: string);
+begin
+  Response.SetCustomHeader( KeyName, AValue);
+end;
+
+procedure TMyCustomWebModule.SetFlashMessage(AValue: string);
+begin
+  ThemeUtil.FlashMessages := AValue;
 end;
 
 procedure TMyCustomWebModule.SetTag(const TagName: string; AValue: TTagCallback);
@@ -541,7 +821,15 @@ begin
   FCreateSession := False;
   FisJSON := False;
   ActionVar := 'act';
+  FOnMenu := nil;
+  FOnSearch := nil;
+  FOnNotification := nil;
+  VisibleModuleName := ClassName;
   //_Initialize( self);
+  {$ifdef DEBUG}
+  if ((AppData.debug) and (AppData.debugLevel <= 1)) then
+    LogUtil.Add(ClassName + '.create()', 'init');
+  {$endif}
 end;
 
 destructor TMyCustomWebModule.Destroy;
@@ -555,20 +843,113 @@ var
 begin
   moduleName := FastPlasAppandler.GetActiveModuleName(ARequest);
   methodDefault := MethodMap.Values[moduleName];
+  {$ifdef DEBUG}
+  if ((AppData.debug) and (AppData.debugLevel <= 1)) then
+    LogUtil.Add('handle request: mod=' + moduleName, 'init');
+  {$endif}
+
+  // CSRF Security
+  if isPost then
+  begin
+    if not HTMLUtil.CheckCSRF(False) then
+    begin
+      //----
+    end;
+  end;
+
+  if not Assigned(OnRequest) then
+  begin
+    OnRequest := @RequestHandlerDefault;
+  end;//-- if not Assigned(OnRequest)
+
   if methodDefault = '' then
   begin
-    AppData.isReady:=True;
+    AppData.isReady := True;
     inherited HandleRequest(ARequest, AResponse);
   end
   else
   begin
     if Application.Request.Method = methodDefault then
-      inherited HandleRequest(ARequest, AResponse)
+    begin
+      AppData.isReady := True;
+      inherited HandleRequest(ARequest, AResponse);
+    end
     else
     begin
+      {$ifdef DEBUG}
+      if ((AppData.debug) and (AppData.debugLevel <= 1)) then
+        LogUtil.Add('handle request: ' + __(__Err_Http_InvalidMethod), 'init');
+      {$endif}
       FastPlasAppandler.DieRaise(__(__Err_Http_InvalidMethod), []);
     end;
   end;
+end;
+
+procedure TMyCustomWebModule.RequestHandlerDefault(Sender: TObject;
+  ARequest: TRequest; AResponse: TResponse; var Handled: boolean);
+begin
+  //AResponse.Content:= __Result_Default_Handler;
+  AResponse.Content := '';
+
+  case ARequest.Method of
+    'GET':
+    begin
+      Get;
+    end;
+    'POST':
+    begin
+      Post;
+    end;
+    'PUT':
+    begin
+      Put;
+    end;
+    'DELETE':
+    begin
+      Delete;
+    end;
+    'OPTION':
+    begin
+      Option;
+    end;
+
+    else
+    begin
+      AResponse.Content := __Result_Default_Handler + ': ' + ARequest.Method;
+    end;
+  end;
+
+  // add header TimeUsage
+  StopTime:= _GetTickCount;
+  ElapsedTime:= StopTime - StartTime;
+  Application.Response.SetCustomHeader( 'TimeUsage', i2s( ElapsedTime));;
+
+  Handled := True;
+end;
+
+procedure TMyCustomWebModule.Get;
+begin
+  Response.Content := __Result_Default_Get;
+end;
+
+procedure TMyCustomWebModule.Post;
+begin
+  Response.Content := __Result_Default_Post;
+end;
+
+procedure TMyCustomWebModule.Put;
+begin
+  Response.Content := __Result_Default_Put;
+end;
+
+procedure TMyCustomWebModule.Delete;
+begin
+  Response.Content := __Result_Default_Delete;
+end;
+
+procedure TMyCustomWebModule.Option;
+begin
+  Response.Content := __Result_Default_Option;
 end;
 
 procedure TMyCustomWebModule.LanguageInit;
@@ -590,8 +971,8 @@ begin
   _SESSION['lang'] := LANG;
 end;
 
-procedure TMyCustomWebModule.TagController(Sender: TObject; const TagString: string;
-  TagParams: TStringList; out ReplaceText: string);
+procedure TMyCustomWebModule.TagController(Sender: TObject;
+  const TagString: string; TagParams: TStringList; out ReplaceText: string);
 begin
   ThemeUtil.TagController(Sender, TagString, TagParams, ReplaceText);
 end;
@@ -613,6 +994,11 @@ begin
 end;
 
 { TPOST }
+
+function TPOST.GetCount: integer;
+begin
+  Result := Application.Request.ContentFields.Count;
+end;
 
 function TPOST.GetValue(const Variable: string): string;
 var
@@ -663,6 +1049,11 @@ end;
 
 { TGET }
 
+function TGET.GetCount: integer;
+begin
+  Result := Application.Request.QueryFields.Count;
+end;
+
 function TGET.GetValue(const Name: string): string;
 begin
   if Application.Request.QueryFields.IndexOfName(Name) = -1 then
@@ -675,6 +1066,15 @@ procedure TGET.SetValue(const Name: string; AValue: string);
 begin
   Application.Request.QueryFields.Values[Name] := AValue;
 end;
+
+{ TSERVER }
+
+function TSERVER.GetValue(const variable: string): string;
+begin
+  Result := GetEnvironmentVariable(variable);
+end;
+
+
 
 { TLazCMSAppandler }
 
@@ -689,6 +1089,7 @@ constructor TFastPlasAppandler.Create(AOwner: TComponent);
 begin
   inherited Create(AOwner);
   FIsDisplayError := False;
+  Application.OnException := @ExceptionHandler;
 end;
 
 destructor TFastPlasAppandler.Destroy;
@@ -711,12 +1112,53 @@ function TFastPlasAppandler.GetActiveModuleName(Arequest: TRequest): string;
   end;
 
 var
-  S: string;
+  S, pathInfo: string;
   I: integer;
+  reg: TRegExpr;
 begin
+{
   Result := ARequest.QueryFields.Values[Application.ModuleVariable];
   if (Result = '') then
   begin
+    try
+      pathInfo := ARequest.PathInfo;
+      pathInfo := ExcludeLeadingPathDelimiter(pathInfo);
+      reg := TRegExpr.Create;
+      for i := 0 to RouteRegexMap.Count - 1 do
+      begin
+        reg.Expression := RouteRegexMap.ValueFromIndex[i];
+        if reg.Exec(pathInfo) then
+        begin
+          s := RouteRegexMap.Names[i];
+          if ModuleFactory.FindModule(S) <> nil then
+          begin
+            Result := s;
+            Break;
+          end;
+        end;
+      end;
+    except
+      on E: Exception do
+        die('OnGetModule: ' + E.Message);
+    end;
+  end;
+  reg.Free;
+  if (Result = '') then
+  begin
+    //if not Application.AllowDefaultModule then
+      raise EFPWebError.Create(__(__ErrNoModuleNameForRequest));
+    //Result := GetDefaultModuleName;
+  end;
+  pr( Result);
+  die('zzzz');
+  Exit;
+}
+
+  //--- OLD STYLE
+  Result := ARequest.QueryFields.Values[Application.ModuleVariable];
+  if (Result = '') then
+  begin
+    {
     S := ARequest.PathInfo;
     if (Length(S) > 0) and (S[1] = '/') then
       Delete(S, 1, 1);                      //Delete the leading '/' if exists
@@ -730,6 +1172,10 @@ begin
     begin
       s := Copy(s, 1, i - 1);
     end;
+    }
+
+    S := ARequest.PathInfo;
+    s := ExcludeLeadingPathDelimiter(s);
     Result := S;
   end;
   if (Result = '') then
@@ -744,15 +1190,49 @@ end;
 procedure TFastPlasAppandler.OnGetModule(Sender: TObject; ARequest: TRequest;
   var ModuleClass: TCustomHTTPModuleClass);
 var
-  s: string;
-  //  m  : TCustomHTTPModule;
-  //  mi : TModuleItem;
-  //  mc : TCustomHTTPModuleClass;
+  s, pathInfo: string;
+  i, j: integer;
+  reg: TRegExpr;
+  m: TCustomHTTPModule;
+  mi: TModuleItem;
+  mc: TCustomHTTPModuleClass;
 begin
   InitializeFastPlaz(Sender);
   s := GetActiveModuleName(ARequest);
   if ModuleFactory.FindModule(S) = nil then
   begin
+    pathInfo := ARequest.PathInfo;
+    pathInfo := ExcludeLeadingPathDelimiter(pathInfo);
+
+    // check with Regex - redefine variable
+    try
+      reg := TRegExpr.Create;
+      for i := 0 to RouteRegexMap.Count - 1 do
+      begin
+        reg.Expression := RouteRegexMap.ValueFromIndex[i];
+        if reg.Exec(pathInfo) then
+        begin
+          s := RouteRegexMap.Names[i];
+          if ModuleFactory.FindModule(S) <> nil then
+          begin
+            ARequest.QueryFields.Values[Application.ModuleVariable] := s;
+            for j := 1 to reg.SubExprMatchCount do
+            begin
+              ARequest.QueryFields.Values['$' + i2s(j)] := reg.Match[j];
+              if j = 3 then
+                ARequest.QueryFields.Values['act'] := reg.Match[j];
+            end;
+            Break;
+          end;
+        end;
+      end;
+    except
+      on E: Exception do
+        die('OnGetModule: ' + E.Message);
+    end;
+    reg.Free;
+
+
     //_Redirect( '/?url='+ copy( ARequest.PathInfo, 2, Length(ARequest.PathInfo)-1) + '&' + ARequest.QueryString );
 
     {
@@ -773,25 +1253,107 @@ begin
     ModuleClass:= mc;
     }
 
-  end
+  end //-- if ModuleFactory.FindModule(S) = nil
   else
   begin
+  end; //-- if ModuleFactory.FindModule(S) = nil
+
+  // Load Module @startup
+  if ModuleLoaded.Count > 0 then
+  begin
+    for i := 0 to ModuleLoaded.Count - 1 do
+    begin
+      ModuleLoaded[i].ModuleStore := LoadModule(ModuleLoaded[i].ModuleName);
+    end;
   end;
 
 end;
 
 procedure TFastPlasAppandler.ExceptionHandler(Sender: TObject; E: Exception);
 begin
-  die(e.Message);
-
+  //Application.ShowException(E);
+  //Application.Terminate;
+  LogUtil.Add(Sender.ClassName + ': ' + E.Message, 'exception');
 end;
 
-function TFastPlasAppandler.Tag_InternalContent_Handler(const TagName: string; Params: TStringList): string;
+function TFastPlasAppandler.Tag_InternalContent_Handler(const TagName: string;
+  Params: TStringList): string;
 begin
   Result := 'Tag_InternalContent_Handler';
 end;
 
-function TFastPlasAppandler.FindModule(ModuleClass: TCustomHTTPModuleClass): TCustomHTTPModule;
+procedure TFastPlasAppandler.AddLoadModule(const ModuleName: string;
+  ModuleClass: TMyCustomWebModuleClass; SkipStreaming: boolean);
+var
+  i: integer;
+  mi: TModuleLoadedItem;
+begin
+  i := ModuleLoaded.IndexOfModule(ModuleName);
+  if i = -1 then
+  begin
+    mi := ModuleLoaded.Add as TModuleLoadedItem;
+    mi.ModuleName := ModuleName;
+    mi.ModuleStore := nil;
+  end
+  else
+    mi := ModuleLoaded[i];
+
+  mi.SkipStreaming := SkipStreaming;
+end;
+
+function TFastPlasAppandler.LoadModule(const ModuleName: string): TMyCustomWebModule;
+var
+  m: TCustomHTTPModule;
+  mi: TModuleItem;
+  mc: TCustomHTTPModuleClass;
+  i: integer;
+begin
+  Result := nil;
+  i := ModuleFactory.IndexOfModule(ModuleName);
+  if i <> -1 then
+  begin
+    mi := ModuleFactory[I];
+    mc := mi.ModuleClass;
+    m := FastPlasAppandler.FindModule(mc);
+    if m = nil then
+    begin
+      if assigned(mi) and mi.SkipStreaming then
+        M := MC.CreateNew(Self)
+      else
+        M := MC.Create(Self);
+      M.Name := ModuleName;
+      Result := TMyCustomWebModule(M);
+    end;
+  end;
+end;
+
+procedure TFastPlasAppandler.RegisterModule(const ModuleName: string;
+  ModuleClass: TMyCustomWebModuleClass; LoadOnStart: boolean; SkipStreaming: boolean);
+var
+  I: integer;
+  MI: TModuleItem;
+  mli: TModuleLoadedItem;
+begin
+  I := ModuleFactory.IndexOfModule(ModuleName);
+  if (I = -1) then
+  begin
+    MI := ModuleFactory.Add as TModuleItem;
+    MI.ModuleName := ModuleName;
+  end
+  else
+    MI := ModuleFactory[I];
+  MI.ModuleClass := ModuleClass;
+  MI.SkipStreaming := SkipStreaming;
+
+  if LoadOnStart then
+  begin
+    AddLoadModule(ModuleName, ModuleClass, SkipStreaming);
+  end; //-- LoadOnStart
+
+end;
+
+function TFastPlasAppandler.FindModule(ModuleClass: TCustomHTTPModuleClass):
+TCustomHTTPModule;
 var
   i: integer;
 begin
@@ -820,8 +1382,11 @@ end;
 initialization
   AppData.isReady := False;
   StartTime := _GetTickCount;
+  //MemoryAllocated := GetHeapStatus.TotalAllocated;
+  MemoryAllocated := SysGetHeapStatus.TotalAllocated;
   SessionController := TSessionController.Create();
   FastPlasAppandler := TFastPlasAppandler.Create(nil);
+  ModuleLoaded := TModuleLoaded.Create(TModuleLoadedItem);
   Route := TRoute.Create;
   ModUtil := TModUtil.Create;
   _DebugInfo := TStringList.Create;
@@ -829,17 +1394,21 @@ initialization
   _POST := TPOST.Create;
   _GET := TGET.Create;
   _SESSION := TSESSION.Create;
+  _SERVER := TSERVER.Create;
   MethodMap := TStringList.Create;
 
 finalization
+  FreeAndNil(RouteRegexMap);
   FreeAndNil(MethodMap);
   FreeAndNil(_SESSION);
   FreeAndNil(_GET);
   FreeAndNil(_POST);
   FreeAndNil(_REQUEST);
+  FreeAndNil(_SERVER);
   FreeAndNil(_DebugInfo);
   FreeAndNil(ModUtil);
   FreeAndNil(Route);
+  FreeAndNil(ModuleLoaded);
   FreeAndNil(FastPlasAppandler);
   FreeAndNil(SessionController);
   {$IFDEF HEAPTRACE}

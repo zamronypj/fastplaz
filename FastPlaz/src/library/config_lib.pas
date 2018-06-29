@@ -67,13 +67,22 @@ end;
 function TMyConfig.GetConfigValue(KeyName: WideString): variant;
 var
   s: WideString;
+  El : TJSONData;
 begin
+  Result := '';
   try
-    s := GetValue(KeyName, '');
-    Result := s;
+    El:=FindElement(StripSlash(KeyName),False);
+    if El.JSONType = jtArray then
+    begin
+      Result := El.AsJSON;
+    end
+    else
+    begin
+      Result := El.AsString;
+    end;
   except
-    on e: Exception do
-      die(e.Message);
+//    on e: Exception do
+//      die(e.Message);
   end;
 end;
 

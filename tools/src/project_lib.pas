@@ -60,7 +60,7 @@ var
   isCreateStructure: boolean;
 begin
   ProjectName := 'fastplaz';
-  targetExecutable := '.' + DirectorySeparator;
+  targetExecutable := '.' + DirectorySeparator + ProjectName + _APP_EXTENSION;
 
   with TfProjectWizard.Create(nil) do
   begin
@@ -78,7 +78,8 @@ begin
     if edt_WebRootDir.Text <> '' then
     begin
       if edt_WebRootDir.Text <> GetUserDir then
-        targetExecutable := IncludeTrailingPathDelimiter(edt_WebRootDir.Text) + ProjectName + _APP_EXTENSION;
+        targetExecutable := IncludeTrailingPathDelimiter(edt_WebRootDir.Text) +
+          ProjectName + _APP_EXTENSION;
     end;
     isCreateStructure := cbx_GenerateStructure.Checked;
     Free;
@@ -99,17 +100,18 @@ begin
     Add('{$mode objfpc}{$H+}');
     Add('');
     Add('uses');
+    Add('  cthreads,');
     Add('  fpcgi, sysutils, fastplaz_handler, common, main;');
     Add('');
     Add('{$R *.res}');
     Add('');
     Add('begin');
-    Add('  Application.Title := Config.GetValue(_SYSTEM_SITENAME, _APP);');
-    Add('  Application.Email := Config.GetValue(_SYSTEM_WEBMASTER_EMAIL,''webmaster@'' + GetEnvironmentVariable(''SERVER_NAME''));');
-    Add('  Application.DefaultModuleName := Config.GetValue(_SYSTEM_MODULE_DEFAULT, ''main'');');
-    Add('  Application.ModuleVariable := Config.GetValue(_SYSTEM_MODULE_VARIABLE, ''mod'');');
+    Add('  Application.Title := string( Config.GetValue(_SYSTEM_SITENAME, _APP));');
+    Add('  Application.Email := string( Config.GetValue(_SYSTEM_WEBMASTER_EMAIL,''webmaster@'' + GetEnvironmentVariable(''SERVER_NAME'')));');
+    Add('  Application.DefaultModuleName := string( Config.GetValue(_SYSTEM_MODULE_DEFAULT, ''main''));');
+    Add('  Application.ModuleVariable := string( Config.GetValue(_SYSTEM_MODULE_VARIABLE, ''mod''));');
     Add('  Application.AllowDefaultModule := True;');
-    Add('  Application.RedirectOnErrorURL := Config.GetValue(_SYSTEM_ERROR_URL, ''/'');');
+    Add('  Application.RedirectOnErrorURL := string( Config.GetValue(_SYSTEM_ERROR_URL, ''/''));');
     Add('  Application.RedirectOnError:= Config.GetValue( _SYSTEM_ERROR_REDIRECT, false);');
     Add('');
     Add('  Application.OnGetModule := @FastPlasAppandler.OnGetModule;');
@@ -118,7 +120,6 @@ begin
     Add('  Application.Initialize;');
     Add('  Application.Run;');
     Add('end.');
-
   end;
   {$ifdef windows}
   AProject.MainFile.SetSourceText(Source.Text, True);
@@ -156,7 +157,6 @@ begin
 end;
 
 function TProjectFastPlazDescriptor.CreateStartFiles(AProject: TLazProject): TModalResult;
-
 var
   Pkg: TIDEPackage;
   filename: string;
@@ -173,8 +173,8 @@ begin
     [nfIsPartOfProject, nfOpenInEditor, nfCreateDefaultSrc]);
 
   // open readme file
-  filename := FastPlazRuntimeDirectory + '..' + DirectorySeparator + 'docs' + DirectorySeparator +
-    'README-new project.txt';
+  filename := FastPlazRuntimeDirectory + '..' + DirectorySeparator +
+    'docs' + DirectorySeparator + 'README-new project.txt';
 
 
   if FileExists(filename) then
